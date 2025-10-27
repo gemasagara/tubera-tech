@@ -54,7 +54,6 @@ def run_yolo_prediction(model, image_path):
         for result in results:
             result.save(filename=predicted_path)
         
-        print(f"  ✓ YOLO prediction saved: {predicted_path}")
         return predicted_path
     
     except Exception as e:
@@ -118,7 +117,7 @@ def save_locally(filename, frame):
     """Save image locally"""
     try:
         cv2.imwrite(filename, frame)
-        print(f"  ✓ Saved {filename} locally")
+        print(f"  ✓ Saved {filename}")
         return True
     except Exception as e:
         print(f"  ✗ Failed to save {filename}: {str(e)}")
@@ -134,20 +133,19 @@ def cleanup_files(*filepaths):
         except Exception as e:
             print(f"  ✗ Failed to delete {filepath}: {str(e)}")
 
-def capture_sequence(yolo_model):
-    # Run the full capture sequence
+def capture_phase():
+    """
+    PHASE 1: Just capture images quickly without any processing
+    Returns list of captured image filenames
+    """
     print("\n" + "="*50)
-    print("STARTING CAPTURE SEQUENCE")
+    print("PHASE 1: CAPTURING IMAGES")
     print("="*50)
-    
-    if yolo_model is None:
-        print("ERROR: YOLO model not loaded. Cannot continue.")
-        return
     
     # Initialize cameras
     video_capture_0, video_capture_1 = initialize_cameras()
     if not video_capture_0 or not video_capture_1:
-        return
+        return []
     
     window_name = "Dual Camera View"
     cv2.namedWindow(window_name)
@@ -155,6 +153,7 @@ def capture_sequence(yolo_model):
     start_time = time.time()
     last_capture_time = start_time
     capture_count = 0
+    captured_files = []
     
     print(f"Running {CAPTURE_DURATION}s capture session...")
     print(f"Captures every {CAPTURE_INTERVAL}s")
@@ -172,7 +171,7 @@ def capture_sequence(yolo_model):
             
             # Check if session complete
             if elapsed_time >= CAPTURE_DURATION:
-                print(f"\n✓ Session complete! Total captures: {capture_count}")
+                print(f"\n✓ Capture phase complete! Total captures: {capture_count}")
                 break
             
             # Check if time to capture
@@ -183,32 +182,16 @@ def capture_sequence(yolo_model):
                 filename_0 = f"camera_0_{timestamp}.jpg"
                 filename_1 = f"camera_1_{timestamp}.jpg"
                 
-                print(f"\n--- Processing capture #{capture_count + 1} ---")
-                
-                # Step 1: Save original images locally
+                # Just save quickly - no processing!
                 save_locally(filename_0, video_frame_0)
                 save_locally(filename_1, video_frame_1)
                 
-                # Step 2: Run YOLO predictions
-                print("Running YOLO predictions...")
-                predicted_0 = run_yolo_prediction(yolo_model, filename_0)
-                predicted_1 = run_yolo_prediction(yolo_model, filename_1)
-                
-                # Step 3: Upload predicted images to Supabase
-                if USE_SUPABASE:
-                    print("Uploading to Supabase...")
-                    if predicted_0:
-                        upload_to_supabase(os.path.basename(predicted_0), predicted_0)
-                    if predicted_1:
-                        upload_to_supabase(os.path.basename(predicted_1), predicted_1)
-                
-                # Step 4: Cleanup - delete both original and predicted images
-                print("Cleaning up local files...")
-                cleanup_files(filename_0, filename_1, predicted_0, predicted_1)
+                captured_files.append(filename_0)
+                captured_files.append(filename_1)
                 
                 capture_count += 1
                 last_capture_time = time.time()
-                print(f"✓ Capture pair #{capture_count} complete")
+                print(f"Captured pair #{capture_count}")
             
             # Display preview
             combined_frame = np.hstack((video_frame_0, video_frame_1))
@@ -233,15 +216,72 @@ def capture_sequence(yolo_model):
             cv2.imshow(window_name, display_frame)
             
             if cv2.waitKey(1) & 0xFF == ord('q'):
-                print(f"\n✓ Session ended early. Captures: {capture_count}")
+                print(f"\n✓ Capture ended early. Captures: {capture_count}")
                 break
     
     finally:
         release_cameras(video_capture_0, video_capture_1)
     
+    return captured_files
+
+def processing_phase(yolo_model, captured_files):
+    """
+    PHASE 2: Process captured images with YOLO, upload, and cleanup
+    """
+    if not captured_files:
+        print("No images to process!")
+        return
+    
     print("\n" + "="*50)
-    print("SEQUENCE COMPLETE")
-    print("="*50 + "\n")
+    print("PHASE 2: PROCESSING & UPLOADING")
+    print("="*50)
+    print(f"Processing {len(captured_files)} images...\n")
+    
+    for i, filename in enumerate(captured_files, 1):
+        print(f"[{i}/{len(captured_files)}] Processing {filename}...")
+        
+        if not os.path.exists(filename):
+            print(f"  ✗ File not found: {filename}")
+            continue
+        
+        # Run YOLO prediction
+        predicted_path = run_yolo_prediction(yolo_model, filename)
+        
+        if predicted_path:
+            print(f"  ✓ YOLO prediction created")
+            
+            # Upload predicted image to Supabase
+            if USE_SUPABASE:
+                upload_to_supabase(os.path.basename(predicted_path), predicted_path)
+            
+            # Cleanup both original and predicted
+            cleanup_files(filename, predicted_path)
+        else:
+            # If prediction failed, still cleanup original
+            cleanup_files(filename)
+        
+        print()  # Empty line for readability
+    
+    print("="*50)
+    print("PROCESSING COMPLETE")
+    print("="*50)
+
+def capture_sequence(yolo_model):
+    """
+    Main sequence: First capture all images, then process them
+    """
+    if yolo_model is None:
+        print("ERROR: YOLO model not loaded. Cannot continue.")
+        return
+    
+    # PHASE 1: Capture images (fast, no lag)
+    captured_files = capture_phase()
+    
+    # PHASE 2: Process, upload, and cleanup (after cameras are closed)
+    if captured_files:
+        processing_phase(yolo_model, captured_files)
+    
+    print("\n✓ Full sequence complete!\n")
 
 def main():
     # Main loop waiting for commands
