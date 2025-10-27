@@ -14,6 +14,10 @@ CAMERA_1_INDEX = 2
 # YOLO Configuration
 YOLO_MODEL_PATH = "yolo11n.pt"  # Make sure this file is in your working directory
 
+# Define your custom leaf color classes (for future custom model)
+LEAF_COLOR_CLASSES = ['dark_green', 'light_green', 'green', 'yellow', 'brown'] # modify this later
+WEED_CLASS = 'crop_weed'
+
 # Database configuration (choose your option below)
 USE_SUPABASE = True  # Set to True for Supabase, False for local storage
 
@@ -37,14 +41,59 @@ def load_yolo_model():
         print("Make sure yolo11n.pt is in the current directory")
         return None
 
+# YOU ONLY NEED TO FOCUS ON THIS FUNCTION
+def extract_detection_data(results):
+    """
+    Extract leaf color and weed count from YOLO detection results
+    Returns: (leaf_color: str, weed_count: int)
+    """
+    leaf_color = "none"
+    weed_count = 0
+    
+    try:
+        # Get the model's class names
+        if hasattr(results[0], 'names'):
+            class_names = results[0].names
+        else:
+            return leaf_color, weed_count
+        
+        # Get detected boxes
+        if hasattr(results[0], 'boxes') and results[0].boxes is not None:
+            boxes = results[0].boxes
+            
+            # Iterate through detections
+            for box in boxes:
+                class_id = int(box.cls[0])
+                class_name = class_names[class_id].lower()
+                
+                # Check if it's a leaf color class
+                if class_name in LEAF_COLOR_CLASSES:
+                    # If multiple leaf colors detected, keep the first one
+                    # You could also implement logic to pick the most confident one
+                    if leaf_color == "none":
+                        leaf_color = class_name
+                
+                # Check if it's a weed
+                elif class_name == WEED_CLASS:
+                    weed_count += 1
+        
+        return leaf_color, weed_count
+    
+    except Exception as e:
+        print(f"  ⚠ Error extracting detection data: {str(e)}")
+        return "none", 0
+
 def run_yolo_prediction(model, image_path):
     """
     Run YOLO prediction on an image and save the result
-    Returns the path to the predicted image
+    Returns: (predicted_path, leaf_color, weed_count)
     """
     try:
         # Run inference
         results = model(image_path, verbose=False)
+        
+        # Extract detection data
+        leaf_color, weed_count = extract_detection_data(results)
         
         # Generate predicted filename
         base_name = os.path.splitext(image_path)[0]
@@ -54,11 +103,11 @@ def run_yolo_prediction(model, image_path):
         for result in results:
             result.save(filename=predicted_path)
         
-        return predicted_path
+        return predicted_path, leaf_color, weed_count
     
     except Exception as e:
         print(f"  ✗ YOLO prediction failed for {image_path}: {str(e)}")
-        return None
+        return None, "none", 0
 
 def initialize_cameras():
     """Initialize both cameras with low resource settings"""
@@ -90,8 +139,8 @@ def release_cameras(video_capture_0, video_capture_1):
         video_capture_1.release()
     cv2.destroyAllWindows()
 
-def upload_to_supabase(filename, filepath):
-    """Upload image to Supabase storage"""
+def upload_to_supabase(filename, filepath, leaf_color, weed_count):
+    """Upload image to Supabase storage with metadata"""
     try:
         with open(filepath, 'rb') as f:
             supabase.storage.from_(BUCKET_NAME).upload(
@@ -100,14 +149,18 @@ def upload_to_supabase(filename, filepath):
                 file_options={"content-type": "image/jpeg"}
             )
         
-        # Store metadata in database table
+        # Store metadata in database table with new fields
         supabase.table('captures').insert({
             'filename': filename,
             'timestamp': datetime.now().isoformat(),
-            'camera': 0 if 'camera_0' in filename else 1
+            'camera': 0 if 'camera_0' in filename else 1,
+            'leaf_color': leaf_color,
+            'weed_count': weed_count
         }).execute()
         
         print(f"  ✓ Uploaded {filename} to Supabase")
+        print(f"    - Leaf color: {leaf_color}")
+        print(f"    - Weed count: {weed_count}")
         return True
     except Exception as e:
         print(f"  ✗ Failed to upload {filename}: {str(e)}")
@@ -244,20 +297,24 @@ def processing_phase(yolo_model, captured_files):
             print(f"  ✗ File not found: {filename}")
             continue
         
-        # Run YOLO prediction
-        predicted_path = run_yolo_prediction(yolo_model, filename)
+        # Run YOLO prediction and extract detection data
+        predicted_path, leaf_color, weed_count = run_yolo_prediction(yolo_model, filename)
         
         if predicted_path:
             print(f"  ✓ YOLO prediction created")
             
-            # Upload predicted image to Supabase
+            # Upload predicted image to Supabase with metadata
             if USE_SUPABASE:
-                upload_to_supabase(os.path.basename(predicted_path), predicted_path)
+                upload_to_supabase(os.path.basename(predicted_path), predicted_path, 
+                                 leaf_color, weed_count)
             
             # Cleanup both original and predicted
             cleanup_files(filename, predicted_path)
         else:
-            # If prediction failed, still cleanup original
+            # If prediction failed, still upload original with default values
+            if USE_SUPABASE:
+                upload_to_supabase(filename, filename, "none", 0)
+            # Cleanup original
             cleanup_files(filename)
         
         print()  # Empty line for readability
