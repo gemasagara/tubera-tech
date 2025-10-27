@@ -3,6 +3,10 @@ import numpy as np
 import time
 from datetime import datetime
 import os
+from ultralytics import YOLO
+
+# Load Model
+model = YOLO("yolo11n.pt") # change later to the actual model
 
 # Configuration
 CAPTURE_DURATION = 60  # seconds
@@ -51,27 +55,30 @@ def release_cameras(video_capture_0, video_capture_1):
         video_capture_1.release()
     cv2.destroyAllWindows()
 
-def upload_to_supabase(filename, filepath):
+def upload_to_supabase(filename):
     """Upload image to Supabase storage"""
+    updatedFilename = f"predicted_{filename}"
     try:
-        with open(filepath, 'rb') as f:
+        with open(updatedFilename, 'rb') as f:
             supabase.storage.from_(BUCKET_NAME).upload(
                 file=f,
-                path=filename,
+                path=updatedFilename,
                 file_options={"content-type": "image/jpeg"}
             )
         
         # Store metadata in database table
         supabase.table('captures').insert({
-            'filename': filename,
+            'filename': updatedFilename,
             'timestamp': datetime.now().isoformat(),
-            'camera': 0 if 'camera_0' in filename else 1
+            'camera': 0 if 'camera_0' in updatedFilename else 1
         }).execute()
         
-        print(f"✓ Uploaded {filename} to Supabase")
+        os.remove(filename)
+        
+        print(f"✓ Uploaded {updatedFilename} to Supabase")
         return True
     except Exception as e:
-        print(f"✗ Failed to upload {filename}: {str(e)}")
+        print(f"✗ Failed to upload {updatedFilename}: {str(e)}")
         return False
 
 def save_locally(filename, frame):
@@ -83,6 +90,17 @@ def save_locally(filename, frame):
     except Exception as e:
         print(f"✗ Failed to save {filename}: {str(e)}")
         return False
+
+def apply_prediction(filename):
+    results = model(filename)
+    # Process results list
+    for result in results:
+        boxes = result.boxes  # Boxes object for bounding box outputs
+        masks = result.masks  # Masks object for segmentation masks outputs
+        keypoints = result.keypoints  # Keypoints object for pose outputs
+        probs = result.probs  # Probs object for classification outputs
+        obb = result.obb  # Oriented boxes object for OBB outputs
+        result.save(filename=f"predicted_{filename}.jpg")  # save to disk
 
 def capture_sequence():
     # Run the full capture sequence
@@ -137,6 +155,9 @@ def capture_sequence():
                 captured_files.append(filename_0)
                 captured_files.append(filename_1)
                 
+                apply_prediction(filename_0)
+                apply_prediction(filename_1)
+                
                 capture_count += 1
                 last_capture_time = time.time()
                 print(f"Captured pair #{capture_count}")
@@ -178,7 +199,7 @@ def capture_sequence():
         
         for filename in captured_files:
             if os.path.exists(filename):
-                upload_to_supabase(filename, filename)
+                upload_to_supabase(filename)
                 # Optionally delete local file after upload
                 # os.remove(filename)
     
