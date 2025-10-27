@@ -5,14 +5,14 @@ from datetime import datetime
 import os
 from ultralytics import YOLO
 
-# Load Model
-model = YOLO("yolo11n.pt") # change later to the actual model
-
 # Configuration
 CAPTURE_DURATION = 60  # seconds
 CAPTURE_INTERVAL = 10  # seconds
 CAMERA_0_INDEX = 0
 CAMERA_1_INDEX = 2
+
+# YOLO Configuration
+YOLO_MODEL_PATH = "yolo11n.pt"  # Make sure this file is in your working directory
 
 # Database configuration (choose your option below)
 USE_SUPABASE = True  # Set to True for Supabase, False for local storage
@@ -24,6 +24,42 @@ if USE_SUPABASE:
     SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJueWFwbWZ1dG5tZXJvdWpoZGpuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE1NTkzNzUsImV4cCI6MjA3NzEzNTM3NX0.yLYZOllU_7LaIHtynS8f-r9QK3oV1wXH_3xenbKaubg"
     BUCKET_NAME = "camera-images"
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def load_yolo_model():
+    """Load YOLO model once at startup"""
+    try:
+        print("Loading YOLO model...")
+        model = YOLO(YOLO_MODEL_PATH)
+        print("✓ YOLO model loaded successfully")
+        return model
+    except Exception as e:
+        print(f"✗ Failed to load YOLO model: {str(e)}")
+        print("Make sure yolo11n.pt is in the current directory")
+        return None
+
+def run_yolo_prediction(model, image_path):
+    """
+    Run YOLO prediction on an image and save the result
+    Returns the path to the predicted image
+    """
+    try:
+        # Run inference
+        results = model(image_path, verbose=False)
+        
+        # Generate predicted filename
+        base_name = os.path.splitext(image_path)[0]
+        predicted_path = f"{base_name}_predicted.jpg"
+        
+        # Save the prediction result
+        for result in results:
+            result.save(filename=predicted_path)
+        
+        print(f"  ✓ YOLO prediction saved: {predicted_path}")
+        return predicted_path
+    
+    except Exception as e:
+        print(f"  ✗ YOLO prediction failed for {image_path}: {str(e)}")
+        return None
 
 def initialize_cameras():
     """Initialize both cameras with low resource settings"""
@@ -55,58 +91,58 @@ def release_cameras(video_capture_0, video_capture_1):
         video_capture_1.release()
     cv2.destroyAllWindows()
 
-def upload_to_supabase(filename):
+def upload_to_supabase(filename, filepath):
     """Upload image to Supabase storage"""
-    updatedFilename = f"predicted_{filename}"
     try:
-        with open(updatedFilename, 'rb') as f:
+        with open(filepath, 'rb') as f:
             supabase.storage.from_(BUCKET_NAME).upload(
                 file=f,
-                path=updatedFilename,
+                path=filename,
                 file_options={"content-type": "image/jpeg"}
             )
         
         # Store metadata in database table
         supabase.table('captures').insert({
-            'filename': updatedFilename,
+            'filename': filename,
             'timestamp': datetime.now().isoformat(),
-            'camera': 0 if 'camera_0' in updatedFilename else 1
+            'camera': 0 if 'camera_0' in filename else 1
         }).execute()
         
-        os.remove(filename)
-        
-        print(f"✓ Uploaded {updatedFilename} to Supabase")
+        print(f"  ✓ Uploaded {filename} to Supabase")
         return True
     except Exception as e:
-        print(f"✗ Failed to upload {updatedFilename}: {str(e)}")
+        print(f"  ✗ Failed to upload {filename}: {str(e)}")
         return False
 
 def save_locally(filename, frame):
     """Save image locally"""
     try:
         cv2.imwrite(filename, frame)
-        print(f"✓ Saved {filename} locally")
+        print(f"  ✓ Saved {filename} locally")
         return True
     except Exception as e:
-        print(f"✗ Failed to save {filename}: {str(e)}")
+        print(f"  ✗ Failed to save {filename}: {str(e)}")
         return False
 
-def apply_prediction(filename):
-    results = model(filename)
-    # Process results list
-    for result in results:
-        boxes = result.boxes  # Boxes object for bounding box outputs
-        masks = result.masks  # Masks object for segmentation masks outputs
-        keypoints = result.keypoints  # Keypoints object for pose outputs
-        probs = result.probs  # Probs object for classification outputs
-        obb = result.obb  # Oriented boxes object for OBB outputs
-        result.save(filename=f"predicted_{filename}.jpg")  # save to disk
+def cleanup_files(*filepaths):
+    """Delete files from the Raspberry Pi"""
+    for filepath in filepaths:
+        try:
+            if filepath and os.path.exists(filepath):
+                os.remove(filepath)
+                print(f"  ✓ Deleted {filepath}")
+        except Exception as e:
+            print(f"  ✗ Failed to delete {filepath}: {str(e)}")
 
-def capture_sequence():
+def capture_sequence(yolo_model):
     # Run the full capture sequence
     print("\n" + "="*50)
     print("STARTING CAPTURE SEQUENCE")
     print("="*50)
+    
+    if yolo_model is None:
+        print("ERROR: YOLO model not loaded. Cannot continue.")
+        return
     
     # Initialize cameras
     video_capture_0, video_capture_1 = initialize_cameras()
@@ -119,7 +155,6 @@ def capture_sequence():
     start_time = time.time()
     last_capture_time = start_time
     capture_count = 0
-    captured_files = []
     
     print(f"Running {CAPTURE_DURATION}s capture session...")
     print(f"Captures every {CAPTURE_INTERVAL}s")
@@ -148,19 +183,32 @@ def capture_sequence():
                 filename_0 = f"camera_0_{timestamp}.jpg"
                 filename_1 = f"camera_1_{timestamp}.jpg"
                 
-                # Save images
+                print(f"\n--- Processing capture #{capture_count + 1} ---")
+                
+                # Step 1: Save original images locally
                 save_locally(filename_0, video_frame_0)
                 save_locally(filename_1, video_frame_1)
                 
-                captured_files.append(filename_0)
-                captured_files.append(filename_1)
+                # Step 2: Run YOLO predictions
+                print("Running YOLO predictions...")
+                predicted_0 = run_yolo_prediction(yolo_model, filename_0)
+                predicted_1 = run_yolo_prediction(yolo_model, filename_1)
                 
-                apply_prediction(filename_0)
-                apply_prediction(filename_1)
+                # Step 3: Upload predicted images to Supabase
+                if USE_SUPABASE:
+                    print("Uploading to Supabase...")
+                    if predicted_0:
+                        upload_to_supabase(os.path.basename(predicted_0), predicted_0)
+                    if predicted_1:
+                        upload_to_supabase(os.path.basename(predicted_1), predicted_1)
+                
+                # Step 4: Cleanup - delete both original and predicted images
+                print("Cleaning up local files...")
+                cleanup_files(filename_0, filename_1, predicted_0, predicted_1)
                 
                 capture_count += 1
                 last_capture_time = time.time()
-                print(f"Captured pair #{capture_count}")
+                print(f"✓ Capture pair #{capture_count} complete")
             
             # Display preview
             combined_frame = np.hstack((video_frame_0, video_frame_1))
@@ -191,18 +239,6 @@ def capture_sequence():
     finally:
         release_cameras(video_capture_0, video_capture_1)
     
-    # Upload to database
-    if USE_SUPABASE and captured_files:
-        print("\n" + "="*50)
-        print("UPLOADING TO DATABASE")
-        print("="*50)
-        
-        for filename in captured_files:
-            if os.path.exists(filename):
-                upload_to_supabase(filename)
-                # Optionally delete local file after upload
-                # os.remove(filename)
-    
     print("\n" + "="*50)
     print("SEQUENCE COMPLETE")
     print("="*50 + "\n")
@@ -210,8 +246,17 @@ def capture_sequence():
 def main():
     # Main loop waiting for commands
     print("="*50)
-    print("CAMERA CAPTURE SERVICE")
+    print("CAMERA CAPTURE SERVICE WITH YOLO")
     print("="*50)
+    
+    # Load YOLO model once at startup
+    yolo_model = load_yolo_model()
+    
+    if yolo_model is None:
+        print("\nERROR: Cannot start without YOLO model.")
+        print("Please ensure yolo11n.pt is in the current directory.")
+        return
+    
     print("\nCommands:")
     print("  'start' or 's' - Start capture sequence")
     print("  'quit' or 'q'  - Exit program")
@@ -222,7 +267,7 @@ def main():
             command = input(">> ").strip().lower()
             
             if command in ['start', 's']:
-                capture_sequence()
+                capture_sequence(yolo_model)
                 print("Ready for next command...\n")
             
             elif command in ['quit', 'q', 'exit']:
