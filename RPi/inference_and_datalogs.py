@@ -4,6 +4,12 @@ import time
 from datetime import datetime
 import os
 from ultralytics import YOLO
+import RPi.GPIO as GPIO
+
+# GPIO Configuration
+GPIO_PIN = 17  # GPIO pin for ESP32 communication
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(GPIO_PIN, GPIO.IN)
 
 # Configuration
 CAPTURE_DURATION = 60  # seconds
@@ -12,17 +18,16 @@ CAMERA_0_INDEX = 0
 CAMERA_1_INDEX = 2
 
 # YOLO Configuration
-YOLO_MODEL_PATH = "yolo11n.pt"  # Make sure this file is in your working directory
+YOLO_MODEL_PATH = "yolo11n.pt"
 
 # Define your custom leaf color classes (for future custom model)
-LEAF_COLOR_CLASSES = ['dark_green', 'light_green', 'green', 'yellow', 'brown'] # modify this later
+LEAF_COLOR_CLASSES = ['dark_green', 'light_green', 'green', 'yellow', 'brown']
 WEED_CLASS = 'crop_weed'
 
-# Database configuration (choose your option below)
-USE_SUPABASE = True  # Set to True for Supabase, False for local storage
+# Database configuration
+USE_SUPABASE = True
 
 if USE_SUPABASE:
-    # Supabase configuration
     from supabase import create_client, Client
     SUPABASE_URL = "https://bnyapmfutnmeroujhdjn.supabase.co"
     SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJueWFwbWZ1dG5tZXJvdWpoZGpuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE1NTkzNzUsImV4cCI6MjA3NzEzNTM3NX0.yLYZOllU_7LaIHtynS8f-r9QK3oV1wXH_3xenbKaubg"
@@ -41,7 +46,6 @@ def load_yolo_model():
         print("Make sure yolo11n.pt is in the current directory")
         return None
 
-# YOU ONLY NEED TO FOCUS ON THIS FUNCTION
 def extract_detection_data(results):
     """
     Extract leaf color and weed count from YOLO detection results
@@ -51,29 +55,22 @@ def extract_detection_data(results):
     weed_count = 0
     
     try:
-        # Get the model's class names
         if hasattr(results[0], 'names'):
             class_names = results[0].names
         else:
             return leaf_color, weed_count
         
-        # Get detected boxes
         if hasattr(results[0], 'boxes') and results[0].boxes is not None:
             boxes = results[0].boxes
             
-            # Iterate through detections
             for box in boxes:
                 class_id = int(box.cls[0])
                 class_name = class_names[class_id].lower()
                 
-                # Check if it's a leaf color class
                 if class_name in LEAF_COLOR_CLASSES:
-                    # If multiple leaf colors detected, keep the first one
-                    # You could also implement logic to pick the most confident one
                     if leaf_color == "none":
                         leaf_color = class_name
                 
-                # Check if it's a weed
                 elif class_name == WEED_CLASS:
                     weed_count += 1
         
@@ -89,17 +86,12 @@ def run_yolo_prediction(model, image_path):
     Returns: (predicted_path, leaf_color, weed_count)
     """
     try:
-        # Run inference
         results = model(image_path, verbose=False)
-        
-        # Extract detection data
         leaf_color, weed_count = extract_detection_data(results)
         
-        # Generate predicted filename
         base_name = os.path.splitext(image_path)[0]
         predicted_path = f"{base_name}_predicted.jpg"
         
-        # Save the prediction result
         for result in results:
             result.save(filename=predicted_path)
         
@@ -118,7 +110,6 @@ def initialize_cameras():
         print("Error: Could not open cameras")
         return None, None
     
-    # Set low resolution
     for cap in [video_capture_0, video_capture_1]:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 160)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 120)
@@ -149,7 +140,6 @@ def upload_to_supabase(filename, filepath, leaf_color, weed_count):
                 file_options={"content-type": "image/jpeg"}
             )
         
-        # Store metadata in database table with new fields
         supabase.table('captures').insert({
             'filename': filename,
             'timestamp': datetime.now().isoformat(),
@@ -195,7 +185,6 @@ def capture_phase():
     print("PHASE 1: CAPTURING IMAGES")
     print("="*50)
     
-    # Initialize cameras
     video_capture_0, video_capture_1 = initialize_cameras()
     if not video_capture_0 or not video_capture_1:
         return []
@@ -222,12 +211,10 @@ def capture_phase():
             elapsed_time = time.time() - start_time
             remaining_time = CAPTURE_DURATION - elapsed_time
             
-            # Check if session complete
             if elapsed_time >= CAPTURE_DURATION:
                 print(f"\n✓ Capture phase complete! Total captures: {capture_count}")
                 break
             
-            # Check if time to capture
             time_since_last_capture = time.time() - last_capture_time
             if time_since_last_capture >= CAPTURE_INTERVAL:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -235,7 +222,6 @@ def capture_phase():
                 filename_0 = f"camera_0_{timestamp}.jpg"
                 filename_1 = f"camera_1_{timestamp}.jpg"
                 
-                # Just save quickly - no processing!
                 save_locally(filename_0, video_frame_0)
                 save_locally(filename_1, video_frame_1)
                 
@@ -246,11 +232,9 @@ def capture_phase():
                 last_capture_time = time.time()
                 print(f"Captured pair #{capture_count}")
             
-            # Display preview
             combined_frame = np.hstack((video_frame_0, video_frame_1))
             display_frame = combined_frame.copy()
             
-            # Add overlay
             overlay = display_frame.copy()
             cv2.rectangle(overlay, (0, 0), (320, 80), (0, 0, 0), -1)
             cv2.addWeighted(overlay, 0.6, display_frame, 0.4, 0, display_frame)
@@ -297,27 +281,22 @@ def processing_phase(yolo_model, captured_files):
             print(f"  ✗ File not found: {filename}")
             continue
         
-        # Run YOLO prediction and extract detection data
         predicted_path, leaf_color, weed_count = run_yolo_prediction(yolo_model, filename)
         
         if predicted_path:
             print(f"  ✓ YOLO prediction created")
             
-            # Upload predicted image to Supabase with metadata
             if USE_SUPABASE:
                 upload_to_supabase(os.path.basename(predicted_path), predicted_path, 
                                  leaf_color, weed_count)
             
-            # Cleanup both original and predicted
             cleanup_files(filename, predicted_path)
         else:
-            # If prediction failed, still upload original with default values
             if USE_SUPABASE:
                 upload_to_supabase(filename, filename, "none", 0)
-            # Cleanup original
             cleanup_files(filename)
         
-        print()  # Empty line for readability
+        print()
     
     print("="*50)
     print("PROCESSING COMPLETE")
@@ -331,19 +310,33 @@ def capture_sequence(yolo_model):
         print("ERROR: YOLO model not loaded. Cannot continue.")
         return
     
-    # PHASE 1: Capture images (fast, no lag)
     captured_files = capture_phase()
     
-    # PHASE 2: Process, upload, and cleanup (after cameras are closed)
     if captured_files:
         processing_phase(yolo_model, captured_files)
     
     print("\n✓ Full sequence complete!\n")
 
+def wait_for_esp32_trigger():
+    """
+    Wait for ESP32 to send a HIGH signal on GPIO pin
+    Returns True when triggered
+    """
+    print("Waiting for ESP32 trigger...")
+    
+    # Wait for the pin to go HIGH
+    while True:
+        if GPIO.input(GPIO_PIN):
+            print("✓ ESP32 Request Received!")
+            # Small debounce delay
+            time.sleep(0.1)
+            return True
+        time.sleep(0.1)  # Check every 100ms to avoid busy-waiting
+
 def main():
-    # Main loop waiting for commands
     print("="*50)
     print("CAMERA CAPTURE SERVICE WITH YOLO")
+    print("ESP32 GPIO TRIGGER MODE")
     print("="*50)
     
     # Load YOLO model once at startup
@@ -352,37 +345,32 @@ def main():
     if yolo_model is None:
         print("\nERROR: Cannot start without YOLO model.")
         print("Please ensure yolo11n.pt is in the current directory.")
+        GPIO.cleanup()
         return
     
-    print("\nCommands:")
-    print("  'start' or 's' - Start capture sequence")
-    print("  'quit' or 'q'  - Exit program")
-    print("\nWaiting for commands...\n")
+    print(f"\nListening on GPIO pin {GPIO_PIN} for ESP32 trigger...")
+    print("Press Ctrl+C to exit\n")
     
-    while True:
-        try:
-            command = input(">> ").strip().lower()
+    try:
+        while True:
+            # Wait for ESP32 to trigger
+            wait_for_esp32_trigger()
             
-            if command in ['start', 's']:
-                capture_sequence(yolo_model)
-                print("Ready for next command...\n")
+            # Run the capture sequence
+            capture_sequence(yolo_model)
             
-            elif command in ['quit', 'q', 'exit']:
-                print("Shutting down...")
-                break
-            
-            elif command == '':
-                continue
-            
-            else:
-                print(f"Unknown command: '{command}'")
-                print("Use 'start' to capture or 'quit' to exit\n")
-        
-        except KeyboardInterrupt:
-            print("\n\nShutting down...")
-            break
-        except Exception as e:
-            print(f"Error: {str(e)}")
+            print("Ready for next ESP32 trigger...\n")
+    
+    except KeyboardInterrupt:
+        print("\n\nShutting down...")
+    
+    except Exception as e:
+        print(f"Error: {str(e)}")
+    
+    finally:
+        # Clean up GPIO
+        GPIO.cleanup()
+        print("GPIO cleanup complete")
 
 if __name__ == "__main__":
     main()
